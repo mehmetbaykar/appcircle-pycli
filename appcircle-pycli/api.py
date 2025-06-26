@@ -3,9 +3,34 @@ import click
 import json
 import logging
 import urllib.parse
+from typing import Optional, Dict, Any
 from .config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
+
+
+class APIError(Exception):
+    """Base exception for API-related errors"""
+    def __init__(self, status_code: int, message: str, response_data: Optional[Dict] = None):
+        self.status_code = status_code
+        self.message = message
+        self.response_data = response_data
+        super().__init__(f"API Error {status_code}: {message}")
+
+
+class AuthenticationError(APIError):
+    """Authentication-related errors"""
+    pass
+
+
+class RateLimitError(APIError):
+    """Rate limiting errors"""
+    pass
+
+
+class ValidationError(APIError):
+    """Request validation errors"""
+    pass
 
 
 class API:
@@ -14,30 +39,98 @@ class API:
         config = config_manager.get_config()
         current_env = config["current"]
         self.api_hostname = config["envs"][current_env]["API_HOSTNAME"]
-        self.access_token = config["envs"][current_env]["AC_ACCESS_TOKEN"]
+        self._access_token = config["envs"][current_env]["AC_ACCESS_TOKEN"]
         self.headers = {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
+        
+        if not self._access_token or self._access_token.strip() == "":
+            raise AuthenticationError(401, "Access token is required but not configured")
+    
+    def _get_auth_headers(self):
+        """Get authentication headers securely"""
+        if not self._access_token:
+            raise AuthenticationError(401, "No access token available")
+        
+        return {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+        }
+    
+    def _get_safe_headers_for_logging(self):
+        """Get headers with sensitive data redacted for logging"""
+        return {k: v if k != "Authorization" else "Bearer [REDACTED]" 
+                for k, v in self.headers.items()}
+    
+    def _validate_token(self):
+        """Validate token format and potentially check expiry"""
+        if not self._access_token:
+            return False
+        return True
+    
+    def _handle_response(self, response: requests.Response) -> Any:
+        """Process response with proper error handling"""
+        logger.debug(f"Response: {response.status_code} {response.reason}")
+        
+        if response.status_code == 401:
+            try:
+                error_data = response.json() if response.content else {}
+                message = error_data.get('message', 'Authentication failed')
+                raise AuthenticationError(401, message, error_data)
+            except json.JSONDecodeError:
+                raise AuthenticationError(401, "Authentication failed")
+        elif response.status_code == 403:
+            try:
+                error_data = response.json() if response.content else {}
+                message = error_data.get('message', 'Access forbidden')
+                raise APIError(403, message, error_data)
+            except json.JSONDecodeError:
+                raise APIError(403, "Access forbidden")
+        elif response.status_code == 429:
+            try:
+                error_data = response.json() if response.content else {}
+                message = error_data.get('message', 'Rate limit exceeded')
+                raise RateLimitError(429, message, error_data)
+            except json.JSONDecodeError:
+                raise RateLimitError(429, "Rate limit exceeded")
+        elif response.status_code >= 400:
+            try:
+                error_data = response.json() if response.content else {}
+                message = error_data.get('message', f"HTTP {response.status_code}")
+                raise APIError(response.status_code, message, error_data)
+            except json.JSONDecodeError:
+                raise APIError(response.status_code, response.text or f"HTTP {response.status_code}")
+        
+        if response.status_code == 204 or not response.content:
+            return {}
+        
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            return response.text
 
     def get(self, path, params=None):
         url = f"{self.api_hostname}{path}"
         logger.debug(f"GET {url}")
-        logger.debug(f"Headers: {self.headers}")
+        safe_headers = self._get_safe_headers_for_logging()
+        logger.debug(f"Headers: {safe_headers}")
         logger.debug(f"Params: {params}")
 
-        response = requests.get(url, headers=self.headers, params=params, timeout=30)
+        response = requests.get(url, headers=self._get_auth_headers(), params=params, timeout=30)
 
-        logger.debug(f"Response Status: {response.status_code}")
+        logger.debug(f"Response Status: {response.status_code} {response.reason}")
         logger.debug(f"Response Headers: {dict(response.headers)}")
-        logger.debug(f"Response Text: {response.text}")
+        if response.status_code < 400 and len(response.text) < 1000:
+            logger.debug(f"Response Text: {response.text[:500]}..." if len(response.text) > 500 else f"Response Text: {response.text}")
+        else:
+            logger.debug(f"Response length: {len(response.text)} bytes")
 
-        response.raise_for_status()
-        return response.json()
+        return self._handle_response(response)
 
     def post(self, path, data=None, files=None, content_type=None):
         url = f"{self.api_hostname}{path}"
-        headers = self.headers.copy()
+        headers = self._get_auth_headers().copy()
 
         if content_type:
             headers["Content-Type"] = content_type
@@ -46,7 +139,9 @@ class API:
                 del headers["Content-Type"]
 
         logger.debug(f"POST {url}")
-        logger.debug(f"Headers: {headers}")
+        safe_headers = {k: v if k != "Authorization" else "Bearer [REDACTED]" 
+                      for k, v in headers.items()}
+        logger.debug(f"Headers: {safe_headers}")
         logger.debug(f"Data: {data}")
         logger.debug(f"Files: {files}")
 
@@ -63,38 +158,49 @@ class API:
         logger.debug(f"Response Headers: {dict(response.headers)}")
         logger.debug(f"Response Text: {response.text}")
 
-        response.raise_for_status()
-        if response.status_code == 204 or not response.content:
-            return {}
-        try:
-            return response.json()
-        except json.JSONDecodeError:
-            return response.text
+        return self._handle_response(response)
 
     def put(self, path, data=None):
         url = f"{self.api_hostname}{path}"
-        response = requests.put(url, headers=self.headers, json=data, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        logger.debug(f"PUT {url}")
+        safe_headers = self._get_safe_headers_for_logging()
+        logger.debug(f"Headers: {safe_headers}")
+        
+        response = requests.put(url, headers=self._get_auth_headers(), json=data, timeout=30)
+        
+        return self._handle_response(response)
 
     def patch(self, path, data=None):
         url = f"{self.api_hostname}{path}"
-        response = requests.patch(url, headers=self.headers, json=data, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        logger.debug(f"PATCH {url}")
+        safe_headers = self._get_safe_headers_for_logging()
+        logger.debug(f"Headers: {safe_headers}")
+        
+        response = requests.patch(url, headers=self._get_auth_headers(), json=data, timeout=30)
+        
+        return self._handle_response(response)
 
     def delete(self, path, data=None):
         url = f"{self.api_hostname}{path}"
-        response = requests.delete(url, headers=self.headers, json=data, timeout=30)
-        response.raise_for_status()
-        if response.status_code == 204 or not response.content:
-            return {}
-        return response.json()
+        logger.debug(f"DELETE {url}")
+        safe_headers = self._get_safe_headers_for_logging()
+        logger.debug(f"Headers: {safe_headers}")
+        
+        response = requests.delete(url, headers=self._get_auth_headers(), json=data, timeout=30)
+        
+        return self._handle_response(response)
 
     def download(self, path):
         url = f"{self.api_hostname}{path}"
-        response = requests.get(url, headers=self.headers, stream=True, timeout=30)
-        response.raise_for_status()
+        logger.debug(f"DOWNLOAD {url}")
+        safe_headers = self._get_safe_headers_for_logging()
+        logger.debug(f"Headers: {safe_headers}")
+        
+        response = requests.get(url, headers=self._get_auth_headers(), stream=True, timeout=30)
+        
+        logger.debug(f"Response Status: {response.status_code} {response.reason}")
+        if response.status_code >= 400:
+            self._handle_response(response)
         return response
 
 
@@ -444,7 +550,11 @@ def start_build(options):
 
 
 def get_active_builds():
-    return get_api().get("/build/v2/builds/active")
+    """Get active builds using the correct API endpoint"""
+    builds = get_api().get("/build/v1/queue/my-dashboard?page=1&size=1000")
+    if "data" in builds and builds["data"] is not None:
+        return [b for b in builds["data"] if b.get("buildId") is not None]
+    return []
 
 
 def get_builds(profile_id, branch_id, commit_id):
