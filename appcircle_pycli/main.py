@@ -1,4 +1,5 @@
 import click
+from . import __version__
 from .config import config
 from .login import login
 from .build import build
@@ -10,11 +11,20 @@ from .enterprise_app_store import enterprise_app_store
 from .organization import organization
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.option("--debug", is_flag=True, help="Enable debug mode with verbose output")
+@click.option("--version", is_flag=True, help="Show version and exit")
 @click.pass_context
-def cli(ctx, debug):
+def cli(ctx, debug, version):
     """Appcircle CLI"""
+    if version:
+        click.echo(f"appcircle-pycli {__version__}")
+        ctx.exit(0)
+    
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+    
     ctx.ensure_object(dict)
     ctx.obj["debug"] = debug
     if debug:
