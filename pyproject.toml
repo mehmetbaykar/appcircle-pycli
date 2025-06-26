@@ -27,4 +27,4 @@ dependencies = [
 "Bug Tracker" = "https://github.com/mehmetbaykar/appcircle-pycli/issues"
 
 [project.scripts]
-appcircle-pycli = "appcircle-pycli.main:cli"
+appcircle-pycli = "appcircle_pycli.main:cli"
