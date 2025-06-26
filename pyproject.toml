@@ -1,0 +1,30 @@
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appcircle-pycli"
+version = "0.1.0"
+authors = [
+  { name="Mehmet Baykar", email="se.mehmet.baykar@gmail.com" },
+]
+description = "A Python CLI for Appcircle"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "click",
+    "requests",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/mehmetbaykar/appcircle-pycli"
+"Bug Tracker" = "https://github.com/mehmetbaykar/appcircle-pycli/issues"
+
+[project.scripts]
+appcircle-pycli = "appcircle_pycli.main:cli"
